@@ -1,14 +1,73 @@
 # Серверная часть системы обзоров и пользовательских оценок игр
 
-Стек: Python 3.12, FastAPI, PostgreSQL 16 (SQLAlchemy 2.x + asyncpg), Redis, RabbitMQ, Docker Compose.
+Серверное веб-приложение для сбора, автоматической премодерации, хранения и статистической агрегации пользовательских обзоров и оценок компьютерных игр.
 
-## Быстрый запуск
-docker compose up --build
+Проект разработан на принципах **Чистой архитектуры (Clean Architecture)** в реализации подхода **«Порты и адаптеры»** с изоляцией доменной логики от инфраструктуры.
 
-Swagger UI: http://localhost:8000/docs  
-RabbitMQ UI: http://localhost:15672 (guest / guest)
+## Основные возможности
+- Регистрация и аутентификация пользователей на базе **JWT (RFC 7519)** и хеширования **bcrypt**, ролевая модель (`user`, `moderator`, `admin`).
+- Каталог видеоигр с поиском, метаданными в `JSONB` и предрассчитанным рейтингом.
+- Идемпотентная публикация и обновление рецензий (правило «один пользователь — один отзыв на игру» гарантировано на уровне БД).
+- Автоматическая премодерация текста (фильтрация стоп-слов, рекламных ссылок и SHA-256 дубликатов за 24 часа) с записью решений в журнал `moderation_logs`.
+- **Байесовское сглаживание рейтинга** (порог доверия $m = 30$) и **двухкритериальный детектор ревью-бомбинга** в 60-минутном скользящем окне.
+- Неблокирующий асинхронный пересчёт рейтингов через брокер **RabbitMQ** (с поддержкой Dead Letter Queue) и кэширование карточек игр в **Redis** по стратегии **Cache-Aside** с защитой от лавины кэша.
 
-## Запуск тестов и линтеров
-pytest
-flake8 src tests --max-line-length=100
-black --check src tests
+## Технологический стек
+- **Язык и API:** Python 3.12, FastAPI, Uvicorn, Pydantic v2
+- **База данных:** PostgreSQL 16, SQLAlchemy 2.x, `asyncpg`
+- **Кэширование и очереди:** Redis 7, RabbitMQ 3.13 (`aio-pika`)
+- **Тестирование и качество кода:** `pytest`, `httpx`, `Locust`, `flake8`, `black`
+- **Контейнеризация:** Docker, Docker Compose
+
+---
+
+## Запуск с нуля
+
+### Требования
+- Установленный **Docker** и **Docker Compose** (например, Docker Desktop).
+
+### 1. Клонирование и запуск всех сервисов
+```bash
+git clone https://github.com/N0tN0t/GameReviewsServerPart
+cd GameReviewsServerPart
+docker compose up -d --build
+```
+При старте автоматически поднимаются PostgreSQL 16, Redis 7, RabbitMQ 3.13, веб-сервер FastAPI и фоновый воркер пересчёта рейтингов, а таблицы базы данных создаются автоматически.
+
+### 2. Доступные интерфейсы
+- **Swagger UI (документация и тестирование API):** http://localhost:8000/docs
+- **Панель управления RabbitMQ:** http://localhost:15672 (логин и пароль: `guest` / `guest`)
+
+---
+
+## Быстрая проверка основного сценария в Swagger UI
+1. Откройте http://localhost:8000/docs.
+2. Зарегистрируйте пользователя через `POST /api/v1/auth/register` (получите JWT-токен).
+3. Чтобы создать первую игру в каталоге, выдайте пользователю права администратора:
+   ```bash
+   docker compose exec postgres psql -U app_user -d game_reviews -c "UPDATE users SET role = 'admin';"
+   ```
+4. Выполните вход через `POST /api/v1/auth/login`, скопируйте `access_token` и нажмите кнопку **Authorize** в правом верхнем углу Swagger UI.
+5. Создайте карточку игры через `POST /api/v1/games` и скопируйте её `id`.
+6. Опубликуйте отзыв через `PUT /api/v1/games/{game_id}/reviews` (оценка от 1 до 10 и текст от 20 символов).
+7. Запросите карточку через `GET /api/v1/games/{game_id}` — рейтинг обновится фоновым воркером через RabbitMQ, а последующие чтения будут отдаваться из кэша Redis.
+
+---
+
+## Запуск тестов и проверка качества кода
+```bash
+# Модульные и интеграционные тесты (11 тестов)
+docker compose run --rm --no-deps api pytest
+
+# Проверка стиля и форматирования
+docker compose run --rm --no-deps api flake8 src tests --max-line-length=100
+docker compose run --rm --no-deps api black --check src tests
+
+# Нагрузочное тестирование каталога (30 секунд, 50 пользователей)
+docker compose run --rm --no-deps api locust -f tests/locustfile.py --host=http://api:8000 --headless -u 50 -r 10 -t 30s
+```
+
+## Остановка сервисов
+```bash
+docker compose down
+```
